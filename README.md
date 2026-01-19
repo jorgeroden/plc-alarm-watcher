@@ -25,29 +25,33 @@ Designed for monitoring the **pellet boiler installation** at **IES Amparo Sanz*
   - `beautifulsoup4`
   - `python-dotenv`
 
-##Install inside the venv:
+---
+
+## Install inside the venv:
 
 ```bash
 python -m pip install requests beautifulsoup4 python-dotenv
 
-##Installation
+---
 
-###Clone repository
+## Installation
+
+### Clone repository
 
 git clone git@github.com:jorgeroden/plc-alarm-watcher.git
 cd plc-alarm-watcher
 
-###Create virtual environment
+### Create virtual environment
 
 python3 -m venv venv
 source venv/bin/activate
 python -m pip install requests beautifulsoup4 python-dotenv
 
-###Create .env
+### Create .env
 
 cp .env.example .env
 
-###Edit .env and set your values:
+### Edit .env and set your values:
 
 PLC_BASE_URL
 PLC_USERNAME
@@ -55,12 +59,12 @@ PLC_PASSWORD
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
 
-###Running manually
+### Running manually
 
 source venv/bin/activate
 python watcher.py
 
-###Running as a systemd service
+### Running as a systemd service
 
 sudo nano /etc/systemd/system/plc-watcher.service
 
@@ -82,17 +86,17 @@ RestartSec=10
 WantedBy=multi-user.target
 
 
-###Enable and start the service:
+### Enable and start the service:
 
 sudo systemctl daemon-reload
 sudo systemctl enable plc-watcher.service
 sudo systemctl restart plc-watcher.service
 
-###Check logs:
+### Check logs:
 
 journalctl -u plc-watcher.service -f
 
-###Alarm History Log
+### Alarm History Log
 
 A CSV file is automatically created and appended when a new alarm is detected:
 
