@@ -1,0 +1,20 @@
+cd ~/plc-alarm-watcher
+cat > .gitignore <<'EOF'
+# Secrets
+.env
+
+# Runtime state / logs
+alarm_state.json
+alarms_log.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# OS
+.DS_Store
+EOF
