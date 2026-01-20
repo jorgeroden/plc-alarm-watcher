@@ -50,8 +50,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SUBJECT_PREFIX = os.getenv("SUBJECT_PREFIX", "[Caldera Pellet]")
 ONLY_OCCURRED = os.getenv("ONLY_OCCURRED", "true").lower() in ("1", "true", "yes", "y")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "10"))
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "1800"))
 
+MAX_NOTIFICATIONS_PER_CYCLE = int(os.getenv("MAX_NOTIFICATIONS_PER_CYCLE", "10"))
 STATE_FILE = os.getenv("STATE_FILE", "alarm_state.json")
 
 
@@ -186,7 +187,7 @@ def fetch_alarms_page(session, param0):
     return r.text, alarms_url
 
 
-def parse_latest_alarm(alarms_html: str, alarms_url: str):
+def parse_alarms(alarms_html: str, alarms_url: str):
     soup = BeautifulSoup(alarms_html, "html.parser")
     table = soup.find("table")
     if not table:
@@ -194,42 +195,54 @@ def parse_latest_alarm(alarms_html: str, alarms_url: str):
 
     rows = table.find_all("tr")
     if len(rows) < 2:
-        return None
+        return []
 
-    tds = rows[1].find_all("td")
-    if len(tds) < 7:
-        raise RuntimeError("Fila de alarma con formato inesperado")
+    alarms = []
+    for row in rows[1:]:  # skip header
+        tds = row.find_all("td")
+        if len(tds) < 7:
+            continue
 
-    ref = tds[0].get_text(strip=True)
-    etiqueta = tds[1].get_text(strip=True)
-    tipo = tds[2].get_text(strip=True)
-    valor = tds[3].get_text(strip=True)
-    hora = tds[4].get_text(strip=True)
-    transicion = tds[5].get_text(strip=True)
-    estado = tds[6].get_text(strip=True)
+        ref = tds[0].get_text(strip=True)
+        etiqueta = tds[1].get_text(strip=True)
+        tipo = tds[2].get_text(strip=True)
+        valor = tds[3].get_text(strip=True)
+        hora = tds[4].get_text(strip=True)
+        transicion = tds[5].get_text(strip=True)
+        estado = tds[6].get_text(strip=True)
 
-    alarm_id = f"{ref}|{hora}|{transicion}|{valor}|{etiqueta}"
+        alarm_id = f"{ref}|{hora}|{transicion}|{valor}|{etiqueta}"
 
-    return {
-        "id": alarm_id,
-        "ref": ref,
-        "etiqueta": etiqueta,
-        "tipo": tipo,
-        "valor": valor,
-        "hora": hora,
-        "transicion": transicion,
-        "estado": estado,
-        "url": alarms_url,
-    }
+        alarms.append({
+            "id": alarm_id,
+            "ref": ref,
+            "etiqueta": etiqueta,
+            "tipo": tipo,
+            "valor": valor,
+            "hora": hora,
+            "transicion": transicion,
+            "estado": estado,
+            "url": alarms_url,
+        })
 
+    return alarms  # ordered: most recent first (same as table)
 
 def send_telegram(alarm: dict):
-    # Message text (simple, robust)
+    tr = alarm["transicion"].strip().lower()
+
+    if tr == "ocurrido":
+        header = f"🚨 {SUBJECT_PREFIX} ALARM OCCURRED"
+    elif tr == "eliminado":
+        header = f"✅ {SUBJECT_PREFIX} ALARM CLEARED"
+    else:
+        header = f"ℹ️ {SUBJECT_PREFIX} ALARM UPDATE"
+
     text = (
-        f"🚨 {SUBJECT_PREFIX} ALARMA\n"
+        f"{header}\n"
         f"{alarm['ref']} - {alarm['etiqueta']}\n"
         f"🕒 {alarm['hora']}\n"
         f"🔁 {alarm['transicion']} | 📌 {alarm['estado']}\n"
+        f"🔢 Value: {alarm['valor']}\n"
         f"🌐 {alarm['url']}"
     )
 
@@ -238,29 +251,74 @@ def send_telegram(alarm: dict):
     if r.status_code != 200:
         raise RuntimeError(f"Telegram API error {r.status_code}: {r.text}")
 
-
 def check_once():
     last_id = load_last_id()
+
     session, param0 = login_and_get_session()
     alarms_html, alarms_url = fetch_alarms_page(session, param0)
-    alarm = parse_latest_alarm(alarms_html, alarms_url)
 
-    if alarm is None:
+    alarms = parse_alarms(alarms_html, alarms_url)
+    if not alarms:
         log("No hay alarmas en la tabla.")
         return
 
-    if ONLY_OCCURRED and alarm["transicion"].strip().lower() != "ocurrido":
-        log("Última alarma no es 'Ocurrido' (filtro activo).")
-        return
+    # alarms[0] es la más reciente
+    new_alarms = []
+    for a in alarms:
+        if last_id and a["id"] == last_id:
+            break
+        new_alarms.append(a)
 
-    if alarm["id"] == last_id:
+    if not new_alarms:
         log("Sin novedades.")
         return
 
-    send_telegram(alarm)
-    append_alarm_to_csv(alarm)
-    save_last_id(alarm["id"])
-    log(f"✅ Aviso Telegram enviado. Nueva alarma: {alarm['id']}")
+    # Orden cronológico (más antigua -> más nueva)
+    new_alarms.reverse()
+
+    # Siempre registramos TODAS las nuevas en CSV, aunque no se notifiquen
+    for a in new_alarms:
+        append_alarm_to_csv(a)
+
+    # Filtrado (solo "Ocurrido" si está activo)
+    to_notify = []
+    for a in new_alarms:
+        if ONLY_OCCURRED and a["transicion"].strip().lower() != "ocurrido":
+            continue
+        to_notify.append(a)
+
+    if not to_notify:
+        save_last_id(alarms[0]["id"])
+        log(f"Nuevas: {len(new_alarms)} | 0 notificadas (filtro activo).")
+        return
+
+    # Aplicar límite
+    limited = to_notify[:MAX_NOTIFICATIONS_PER_CYCLE]
+    skipped = len(to_notify) - len(limited)
+
+    sent = 0
+    for a in limited:
+        send_telegram(a)
+        sent += 1
+
+    if skipped > 0:
+        msg = (
+            f"⚠️ {SUBJECT_PREFIX} Notification limit reached\n"
+            f"Sent {sent}/{len(to_notify)} alarm notifications in this cycle.\n"
+            f"{skipped} additional alarm(s) were NOT sent to Telegram.\n"
+            f"All alarms were still logged to CSV."
+        )
+        send_telegram_info(msg)
+
+    # Guardar como última vista la más reciente del PLC
+    save_last_id(alarms[0]["id"])
+    log(f"Nuevas: {len(new_alarms)} | Notificadas: {sent} | Omitidas: {skipped}")
+
+def send_telegram_info(text: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"Telegram API error {r.status_code}: {r.text}")
 
 
 def main():
