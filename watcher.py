@@ -280,18 +280,8 @@ def check_once():
     for a in new_alarms:
         append_alarm_to_csv(a)
 
-    # Filtrado (solo "Ocurrido" si está activo)
-    to_notify = []
-    for a in new_alarms:
-        if ONLY_OCCURRED and a["transicion"].strip().lower() != "ocurrido":
-            continue
-        to_notify.append(a)
-
-    if not to_notify:
-        save_last_id(alarms[0]["id"])
-        log(f"Nuevas: {len(new_alarms)} | 0 notificadas (filtro activo).")
-        return
-
+    to_notify = new_alarms
+    
     # Aplicar límite
     limited = to_notify[:MAX_NOTIFICATIONS_PER_CYCLE]
     skipped = len(to_notify) - len(limited)
@@ -330,8 +320,10 @@ def main():
             check_once()
         except Exception as e:
             log(f"ERROR: {e}")
+
+        log(f"Sleeping {POLL_SECONDS} seconds...")
         time.sleep(POLL_SECONDS)
 
-
+        
 if __name__ == "__main__":
     main()
