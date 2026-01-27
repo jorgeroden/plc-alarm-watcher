@@ -3,6 +3,12 @@ cat > .gitignore <<'EOF'
 # Secrets
 .env
 
+# Editor backups
+*~
+*.swp
+*.bak
+
+
 # Runtime state / logs
 alarm_state.json
 alarms_log.csv
@@ -18,3 +24,4 @@ venv/
 # OS
 .DS_Store
 EOF
+nano .gitignore
