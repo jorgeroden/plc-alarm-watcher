@@ -40,9 +40,12 @@ load_dotenv()
 ALARM_LOG_CSV = os.getenv("ALARM_LOG_CSV", "alarms_log.csv")
 
 # -------- CONFIG FROM .env --------
-PLC_BASE_URL = os.getenv("PLC_BASE_URL")          # e.g. http://192.168.1.50
+PLC_BASE_URL = os.getenv("PLC_BASE_URL")         
 PLC_USERNAME = os.getenv("PLC_USERNAME")
 PLC_PASSWORD = os.getenv("PLC_PASSWORD")
+LOG_SIGNALS = os.getenv("LOG_SIGNALS", "true").lower() in ("1", "true", "yes", "y")
+SIGNALS_PATH = os.getenv("SIGNALS_PATH")
+SIGNALS_LOG_CSV  = os.getenv("SIGNALS_LOG_CSV")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -50,7 +53,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SUBJECT_PREFIX = os.getenv("SUBJECT_PREFIX", "[Caldera Pellet]")
 ONLY_OCCURRED = os.getenv("ONLY_OCCURRED", "true").lower() in ("1", "true", "yes", "y")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "10"))
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "1800"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "900"))
 
 MAX_NOTIFICATIONS_PER_CYCLE = int(os.getenv("MAX_NOTIFICATIONS_PER_CYCLE", "10"))
 STATE_FILE = os.getenv("STATE_FILE", "alarm_state.json")
@@ -187,6 +190,95 @@ def fetch_alarms_page(session, param0):
     return r.text, alarms_url
 
 
+def fetch_signals_page(session, param0):
+    # S.htm (Sensores) según tu HTML
+    url = f"{PLC_BASE_URL}{SIGNALS_PATH}?ovrideStart=0&param0={param0}"
+    r = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+    r.raise_for_status()
+    return r.text, url
+
+
+def parse_signals(signals_html: str):
+    soup = BeautifulSoup(signals_html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        raise RuntimeError("No se encontró la tabla de sensores (S.htm)")
+
+    rows = table.find_all("tr")
+    if len(rows) < 2:
+        return []
+
+    signals = []
+    for row in rows[1:]:
+        tds = row.find_all("td")
+        if len(tds) < 6:
+            continue
+
+        # Col 0: <a> S1 / S2 ...
+        code = tds[0].get_text(strip=True)
+        label = tds[1].get_text(strip=True)
+        value = tds[2].get_text(strip=True)
+        unit = tds[3].get_text(strip=True)
+        alarm = tds[5].get_text(strip=True)
+
+        signals.append({
+            "code": code,
+            "label": label,
+            "value": value,
+            "unit": unit,
+            "alarm": alarm,
+        })
+
+    # Ordenar S1, S2, S10... correctamente
+    def key_fn(s):
+        c = s["code"].strip().upper()
+        if c.startswith("S"):
+            try:
+                return int(c[1:])
+            except Exception:
+                return 10**9
+        return 10**9
+
+    signals.sort(key=key_fn)
+    return signals
+
+
+def append_signals_snapshot_to_csv(signals: list, source_url: str):
+    if not signals:
+        return
+
+    base_csv = SIGNALS_LOG_CSV
+    file_exists = os.path.exists(base_csv)
+
+    headers = ["timestamp_local", "source_url"] + [
+        f"{s['code']} {s['label']} [{s['unit']}]".strip() for s in signals
+    ]
+
+    target_csv = base_csv
+
+    if file_exists:
+        try:
+            with open(base_csv, "r", encoding="utf-8") as f:
+                first_line = f.readline().strip("\n")
+            existing_headers = next(csv.reader([first_line]))
+            if existing_headers != headers:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                target_csv = f"{os.path.splitext(base_csv)[0]}_{ts}.csv"
+                log(f"⚠️ Cambió el encabezado de señales. Creo nuevo CSV: {target_csv}")
+                file_exists = False
+        except Exception as e:
+            log(f"⚠️ No pude validar encabezado de {base_csv}: {e}")
+
+    row = [datetime.now().isoformat(timespec="seconds"), source_url] + [s["value"] for s in signals]
+
+    with open(target_csv, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if not file_exists:
+            w.writerow(headers)
+        w.writerow(row)
+
+
+
 def parse_alarms(alarms_html: str, alarms_url: str):
     soup = BeautifulSoup(alarms_html, "html.parser")
     table = soup.find("table")
@@ -255,6 +347,13 @@ def check_once():
     last_id = load_last_id()
 
     session, param0 = login_and_get_session()
+
+    if LOG_SIGNALS:
+        signals_html, signals_url = fetch_signals_page(session, param0)
+        signals = parse_signals(signals_html)
+        append_signals_snapshot_to_csv(signals, signals_url)
+        log(f"Signals logged: {len(signals)}")
+
     alarms_html, alarms_url = fetch_alarms_page(session, param0)
 
     alarms = parse_alarms(alarms_html, alarms_url)
